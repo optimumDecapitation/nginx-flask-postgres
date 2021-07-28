@@ -1,0 +1,213 @@
+## Official docker image, try not to use latest tag.
+image: docker:19.03.1
+
+services:
+  - docker:19.03.1-dind
+
+## Should contain at least these three stages for a basic CI/CD
+stages:
+  - build
+  - review
+  - deploy
+
+variables:
+  ## REMOTE HOST DNS or Private IP of the Deployment VM, please change the example.com with your host
+  DOCKER_BUILDKIT: "1"
+  DOCKER_TLS_CERTDIR: ""
+  
+
+k8s-build-production:
+  variables:
+    DOCKER_HOST: tcp://localhost:2375
+
+  stage: build
+  script:
+    ## Login to Gitlab Provided Container Registry for this project.
+    - registry_login
+    ## Install Docker Compose 
+    - install_compose
+    - sed_files compose
+    - docker-compose build --pull --compress --force-rm
+    - push_registry
+
+  only:
+    - master
+
+k8s-tag-production:
+  variables:
+    DOCKER_HOST: tcp://localhost:2375
+  stage: build
+  only:
+    - tags
+  script:
+    ## Login to Gitlab Provided Container Registry for this project.
+    - registry_login
+    ## Install Docker Compose 
+    - install_compose
+    - sed_files compose
+    - docker-compose pull
+    - push_registry
+
+
+deploy_review:
+  image:
+    name: lachlanevenson/k8s-kubectl:latest
+    entrypoint: ["/bin/sh", "-c"]
+  stage: review
+  only:
+    - branches
+  except:
+    - tags
+  environment:
+    name: review/$CI_BUILD_REF_NAME
+    url: https://$CI_ENVIRONMENT_SLUG.$KUBE_INGRESS_BASE_DOMAIN
+    on_stop: stop_review
+  script:
+    - kubectl version
+    - sed_files deployment
+    - cat kube-deployment.yml
+    - kubectl apply -f kube-deployment.yml
+    # - |
+    #   if kubectl apply -f kube-deployment.yml | grep -q unchanged
+    #   then
+    #       echo "=> Patching deployment to force image update."
+    #       kubectl patch -f kube-deployment.yml -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"ci-last-updated\":\"$(date +'%s')\"}}}}}"
+    #   else
+    #       echo "=> Deployment apply has changed the object, no need to force image update."
+    #   fi
+    # - kubectl rollout status -f kube-deployment.yml
+    - kubectl get deploy,svc,ing,pod -l app="$(echo ${CI_PROJECT_NAME} | tr "." "-")",ref="${CI_ENVIRONMENT_SLUG}"
+
+stop_review:
+  image:
+    name: lachlanevenson/k8s-kubectl:latest
+    entrypoint: ["/bin/sh", "-c"]
+  stage: review
+  variables:
+    GIT_STRATEGY: none
+  when: manual
+  only:
+    - branches
+  except:
+    - tags
+  environment:
+    name: review/$CI_BUILD_REF_NAME
+    action: stop
+  script:
+    - kubectl version
+    - kubectl delete ing -l ref=${CI_ENVIRONMENT_SLUG}
+    - kubectl delete all -l ref=${CI_ENVIRONMENT_SLUG}
+
+deploy_live:
+  image:
+    name: lachlanevenson/k8s-kubectl:latest
+    entrypoint: ["/bin/sh", "-c"]
+  stage: deploy
+  environment:
+    name: live
+    url: https://$CI_ENVIRONMENT_SLUG.$KUBE_INGRESS_BASE_DOMAIN
+  only:
+    - tags
+  when: manual
+  script:
+    - kubectl version
+    - sed_files deployment
+    - kubectl apply -f kube-deployment.yml
+    # - kubectl rollout status -f kube-deployment.yml
+    - kubectl get deploy,svc,ing,pod -l app="$(echo ${CI_PROJECT_NAME} | tr "." "-")",ref="${CI_ENVIRONMENT_SLUG}"
+
+.helper_functions: &helper_functions_template |
+  function registry_login() {
+    if [[ -n "$CI_REGISTRY_USER" ]]
+    then
+      echo "Logging to GitLab Container Registry with CI credentials..."
+      docker login -u gitlab-ci-token -p "$CI_BUILD_TOKEN" "$CI_REGISTRY"
+      echo ""
+    fi
+  }
+
+  function install_compose() {
+    # if [-n "which apt-get"]]
+    # then
+      echo "Installing Docker Compose on Linux"
+      which docker-compose || apk add --no-cache docker-compose
+    # else
+    #   echo "Installing Docker Compose on Debian"
+    #   which docker-compose || apt-get install docker-compose -y
+    # fi
+  }
+
+  function sed_files() {
+    file_type=${1:-compose}
+    
+    echo "File Type is $file_type"
+
+    if [[ "$file_type" == "deployment" ]]
+    then 
+      echo "Applying SED on Deployment Yamls"
+      sed -i "s~__CI_REGISTRY_IMAGE__~${CI_REGISTRY_IMAGE}~" kube-deployment.yml
+      sed -i "s/__CI_ENVIRONMENT_SLUG__/${CI_ENVIRONMENT_SLUG}/" kube-deployment.yml
+      sed -i "s/__VERSION__/${CI_COMMIT_REF_NAME}/" kube-deployment.yml
+      sed -i "s/__CI_PROJECT_NAME__/${CI_PROJECT_NAME}/" kube-deployment.yml
+      sed -i "s/__CI_PROJECT_PATH_SLUG__/${CI_PROJECT_PATH_SLUG}/" kube-deployment.yml
+      sed -i "s/__KUBE_INGRESS_BASE_DOMAIN__/${KUBE_INGRESS_BASE_DOMAIN}/" kube-deployment.yml
+    else
+      echo "Applying SED on compose Yamls"
+      sed -i "s~__CI_REGISTRY_IMAGE__~${CI_REGISTRY_IMAGE}~" docker-compose.yml
+    fi
+  }
+
+  function push_registry() {
+
+    ## Tag All microservices one by one. Note that docker-compose will build with project_service pattern
+    echo "Tagging Docker Images"
+    docker tag "${CI_REGISTRY_IMAGE}/vote:latest" "${CI_REGISTRY_IMAGE}/vote:${CI_COMMIT_REF_NAME}"
+    docker tag "${CI_REGISTRY_IMAGE}/result:latest" "${CI_REGISTRY_IMAGE}/result:${CI_COMMIT_REF_NAME}"
+    docker tag "${CI_REGISTRY_IMAGE}/worker:latest" "${CI_REGISTRY_IMAGE}/worker:${CI_COMMIT_REF_NAME}"
+
+    ## Check if there is a Commit Tag then release a latest release.
+    if [[ -n $CI_COMMIT_TAG]]
+    then
+      echo "Pushing Docker Latest Images to Container Registry"
+      docker push "${CI_REGISTRY_IMAGE}/vote:latest"
+      docker push "${CI_REGISTRY_IMAGE}/result:latest"
+      docker push "${CI_REGISTRY_IMAGE}/worker:latest"
+    fi
+
+    ## Release a versioned image everytime.
+    echo "Pushing Docker $CI_COMMIT_REF_NAME Images to Container Registry"
+    docker push "$CI_REGISTRY_IMAGE"/vote:$CI_COMMIT_REF_NAME
+    docker push "$CI_REGISTRY_IMAGE"/result:$CI_COMMIT_REF_NAME
+    docker push "$CI_REGISTRY_IMAGE"/worker:$CI_COMMIT_REF_NAME
+  }
+
+  function code_quality() {
+    docker run --env SOURCE_CODE="$PWD" \
+               --volume "$PWD":/code \
+               --volume /var/run/docker.sock:/var/run/docker.sock \
+               "registry.gitlab.com/gitlab-org/security-products/codequality:$SP_VERSION" /code
+  }
+
+  function ensure_namespace() {
+    kubectl describe namespace "$KUBE_NAMESPACE" || kubectl create namespace "$KUBE_NAMESPACE"
+  }
+
+  function check_kube_domain() {
+    if [ -z ${AUTO_DEVOPS_DOMAIN+x} ]
+    then
+      echo "In order to deploy or use Review Apps, AUTO_DEVOPS_DOMAIN variable must be set"
+      echo "You can do it in Auto DevOps project settings or defining a variable at group or project level"
+      echo "You can also manually add it in .gitlab-ci.yml"
+      false
+    else
+      true
+    fi
+  }
+
+  function persist_environment_url() {
+      echo $CI_ENVIRONMENT_URL > environment_url.txt
+  }
+
+
+before_script:
+  - *helper_functions_template

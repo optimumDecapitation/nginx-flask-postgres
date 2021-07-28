@@ -1,0 +1,32 @@
+image: docker:git
+
+services:
+  - docker:19.03.1-dind
+
+variables:
+  CI_REGISTRY_PROJECT: /wuestkamp/k8s-deployment-example-app
+  CONTAINER_IMAGE_LATEST: $CI_REGISTRY$CI_REGISTRY_PROJECT:latest
+  CONTAINER_IMAGE_RELEASE: $CI_REGISTRY$CI_REGISTRY_PROJECT:$CI_COMMIT_REF_NAME
+before_script:
+    - docker info
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+
+stages:
+  - build
+  - release
+
+build latest:
+    stage: build
+    script:
+      - docker build -t $CONTAINER_IMAGE_LATEST .
+      - docker push $CONTAINER_IMAGE_LATEST
+    only:
+      - branches
+
+build release:
+    stage: build
+    script:
+      - docker build -t $CONTAINER_IMAGE_RELEASE .
+      - docker push $CONTAINER_IMAGE_RELEASE
+    only:
+      - tags
