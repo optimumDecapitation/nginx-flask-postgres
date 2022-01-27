@@ -32,6 +32,7 @@ def success():
 @app.route("/jack")
 def success():
     return "jack!"
+    
 @app.route("/push_alert", methods=['POST'])
 def push_alert():
 
