@@ -34,13 +34,20 @@ def success():
     return "jack!"
 
 @app.route("/addition")
-def addtion():
+def addition ():
     all_args = request.args.to_dict()
-    adden = all_args["adden"]
+    adden = all_args["adder"]
     addest = all_args["addest"]
     sum = int(adden) + int(addest)
     return json.dumps(sum)
 
+@app.route("/division")
+def divison ():
+    all_args = request.args.to_dict()
+    divider = all_args["divider"]
+    dividest = all_args["dividest"]
+    product = int(divider) / int(dividest)
+    return json.dumps(product)
 
 @app.route("/push_alert", methods=['POST'])
 def push_alert():
