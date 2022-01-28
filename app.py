@@ -25,14 +25,23 @@ def signup():
         return redirect(url_for('success'))
     return render_template('signup.html', form=form)
 
-@app.route("/success")
-def success():
-    return "success!"
+# @app.route("/success")
+# def success():
+#     return "success!"
 
 @app.route("/jack")
 def success():
     return "jack!"
-    
+
+@app.route("/addition")
+def addtion():
+    all_args = request.args.to_dict()
+    adden = all_args["adden"]
+    addest = all_args["addest"]
+    sum = int(adden) + int(addest)
+    return json.dumps(sum)
+
+
 @app.route("/push_alert", methods=['POST'])
 def push_alert():
 
